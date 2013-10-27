@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
@@ -18,9 +19,9 @@ namespace wpfcsharp.Collection
     {
         #region Fields
 
-        private Boolean isLoading;
         private readonly Func<Object, Task<IEnumerable<T>>> factory;
         private EventHandler canExecuteChangedDelegate;
+        private Int32 loading;
 
         #endregion
 
@@ -39,24 +40,11 @@ namespace wpfcsharp.Collection
 
         #region Properties
 
-        /// <summary>
-        /// 
-        /// </summary>
         public Boolean IsLoading
         {
-            get { return isLoading; }
-            private set
-            {
-                if (value == isLoading) return;
-                isLoading = value;
-                OnPropertyChanged(new PropertyChangedEventArgs("IsLoading"));
-                OnPropertyChanged(new PropertyChangedEventArgs("IsEnabled"));
-            }
+            get { return loading != 0; }
         }
 
-        /// <summary>
-        /// 
-        /// </summary>
         public Boolean IsEnabled
         {
             get { return !IsLoading; }
@@ -67,13 +55,13 @@ namespace wpfcsharp.Collection
         #region Public Members
 
         /// <summary>
-        /// 
+        /// Update collection items.
         /// </summary>
         /// <param name="parameter"></param>
         public void Update(Object parameter = null)
         {
-            var command = (ICommand) this;
-            if(command.CanExecute(parameter))
+            var command = (ICommand)this;
+            if (command.CanExecute(parameter))
                 command.Execute(parameter);
         }
 
@@ -81,11 +69,25 @@ namespace wpfcsharp.Collection
 
         #region Private Members
 
-        /// <summary>
-        /// 
-        /// </summary>
+        private void InternalExecute(Object parameter)
+        {
+            if (Application.Current.CheckAccess())
+            {
+                OnCanExecuteChanged();
+                Clear();
+                ToAsync(factory(parameter), Callback, parameter);
+            }
+            else
+            {
+                Application.Current.Dispatcher.Invoke(DispatcherPriority.DataBind, new Action<Object>(InternalExecute), parameter);
+            }
+        }
+
         private void OnCanExecuteChanged()
         {
+            OnPropertyChanged(new PropertyChangedEventArgs("IsLoading"));
+            OnPropertyChanged(new PropertyChangedEventArgs("IsEnabled"));
+
             var handler = canExecuteChangedDelegate;
             if (handler == null) return;
             handler(this, EventArgs.Empty);
@@ -103,10 +105,11 @@ namespace wpfcsharp.Collection
             {
                 case TaskStatus.RanToCompletion:
                     // The task completed execution successfully.
+                    Action<T> action = Add;
                     foreach (var entity in task.Result)
                     {
                         var obj = entity;
-                        Application.Current.Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action<T>(Add), obj);
+                        Application.Current.Dispatcher.Invoke(DispatcherPriority.DataBind, action, obj);
                     }
                     break;
 
@@ -115,8 +118,8 @@ namespace wpfcsharp.Collection
                     if (task.Exception != null) task.Exception.Handle(ExceptionHandle);
                     break;
             }
-            IsLoading = false;
-            OnCanExecuteChanged();
+            Thread.VolatileWrite(ref loading, 0);
+            Application.Current.Dispatcher.Invoke(DispatcherPriority.DataBind, new Action(OnCanExecuteChanged));
         }
 
         #endregion
@@ -149,10 +152,10 @@ namespace wpfcsharp.Collection
         void ICommand.Execute(object parameter)
         {
             if (factory == null) return;
-            IsLoading = true;
-            OnCanExecuteChanged();
-            Clear();
-            ToAsync(factory(parameter), Callback, parameter);
+            if (Interlocked.CompareExchange(ref loading, 1, 0) == 0)
+            {
+                InternalExecute(parameter);
+            }
         }
 
         #endregion
